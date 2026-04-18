@@ -49,9 +49,13 @@ def analyze(file_path: str) -> SongAnalysis:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    y, sr = librosa.load(str(path), sr=None, mono=True)
+    # sr=22050 ensures consistent mel/chroma basis across all files
+    TARGET_SR = 22050
+    y, sr = librosa.load(str(path), sr=TARGET_SR, mono=True)
 
     tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+    # librosa 0.10+ returns tempo as 0-d numpy array — flatten to scalar
+    tempo = float(np.asarray(tempo).flat[0])
     beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
 
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
@@ -63,7 +67,7 @@ def analyze(file_path: str) -> SongAnalysis:
 
     return SongAnalysis(
         path=str(path.resolve()),
-        bpm=float(round(float(tempo), 2)),
+        bpm=round(tempo, 2),
         key=key,
         energy=round(energy, 4),
         beat_times=beat_times,
