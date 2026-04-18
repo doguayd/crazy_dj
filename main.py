@@ -1,23 +1,58 @@
 """
-crazy_dj CLI — analyze songs, compare them, and generate transition clips.
+crazy_dj CLI
 
-Usage:
-  python main.py analyze <file>
-  python main.py compare <file_a> <file_b>
-  python main.py mix <file_a> <file_b> [--fade 8] [--out output/mix.flac]
-  python main.py scan <directory>
+Komutlar:
+  analyze <file>                      — Tek şarkı analiz et
+  compare <file_a> <file_b>           — İki şarkıyı karşılaştır
+  mix <file_a> <file_b>               — Transition klip üret
+    --fade 8                            Crossfade süresi (saniye)
+    --effect sweep|echo|deep|energetic|clean
+    --out output/mix.flac
+  scan <directory>                    — Tüm klasörü analiz et
+  match                               — DB'den uyumlu çiftleri bul
+    --top 10                            Kaç çift gösterilsin
+    --min-score 0.55                    Minimum uyum skoru
+  setlist                             — Otomatik setlist oluştur
+    --length 8                          Kaç şarkı
+    --start "Şarkı adı"                 Başlangıç şarkısı (opsiyonel)
+  automix                             — Setlist oluşturup tüm geçişleri üret
+    --length 8
+    --effect sweep
+    --fade 8
 """
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 from analyzer.audio_analyzer import analyze
-from analyzer.similarity import compare
+from analyzer.similarity import compare as compare_songs
+from analyzer.matcher import find_compatible_pairs, build_setlist, compatibility_score
 from mixer.crossfader import mix_transition
 from db import store
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _song_name(path: str) -> str:
+    return Path(path).stem
+
+
+def _ensure_analyzed(file_path: str):
+    resolved = str(Path(file_path).resolve())
+    cached = store.load(resolved)
+    if cached:
+        return cached
+    print(f"  Analyzing {Path(file_path).name} ...", end=" ", flush=True)
+    result = analyze(file_path)
+    store.save(result)
+    print(f"{result.bpm:.1f} BPM, {result.key}")
+    return result
+
+
+# ── Komutlar ──────────────────────────────────────────────────────────────────
 
 def cmd_analyze(args):
     store.init_db()
@@ -35,50 +70,57 @@ def cmd_analyze(args):
 
 def cmd_compare(args):
     store.init_db()
-    a = store.load(str(Path(args.file_a).resolve())) or analyze(args.file_a)
-    b = store.load(str(Path(args.file_b).resolve())) or analyze(args.file_b)
-    store.save(a)
-    store.save(b)
-    result = compare(a, b)
-    print(json.dumps(result, indent=2))
+    a = _ensure_analyzed(args.file_a)
+    b = _ensure_analyzed(args.file_b)
+    result = compare_songs(a, b)
+    score = compatibility_score(a, b)
+    print(f"\n{'─'*50}")
+    print(f"  {_song_name(a.path)}  ↔  {_song_name(b.path)}")
+    print(f"{'─'*50}")
+    print(f"  Uyum skoru   : {score:.2f} / 1.00")
+    print(f"  Key uyumu    : {'✓ Evet' if result['key_compatible'] else '✗ Hayır'}  ({a.key} ↔ {b.key})")
+    print(f"  BPM farkı    : {result['bpm_distance']:.1f}  ({a.bpm} ↔ {b.bpm})")
+    print(f"  Chroma benzer: {result['chroma_similarity']:.2f}")
+    print(f"\n  Sync noktaları:")
+    for sp in result["sync_points"]:
+        print(f"    A:{sp['time_a']:.1f}s → B:{sp['time_b']:.1f}s  (skor {sp['score']:.2f})")
 
 
 def cmd_mix(args):
     store.init_db()
-    a = store.load(str(Path(args.file_a).resolve())) or analyze(args.file_a)
-    b = store.load(str(Path(args.file_b).resolve())) or analyze(args.file_b)
-    store.save(a)
-    store.save(b)
+    a = _ensure_analyzed(args.file_a)
+    b = _ensure_analyzed(args.file_b)
 
-    comparison = compare(a, b)
+    comparison = compare_songs(a, b)
     sync = comparison["sync_points"]
     if not sync:
-        print("No sync points found.", file=sys.stderr)
+        print("Sync noktası bulunamadı.", file=sys.stderr)
         sys.exit(1)
 
     best = sync[0]
-    print(f"Best sync: track A @ {best['time_a']}s → track B @ {best['time_b']}s "
-          f"(score {best['score']})")
+    print(f"\nEn iyi sync: A @ {best['time_a']}s → B @ {best['time_b']}s")
+    print(f"Efekt: {args.effect}  |  Fade: {args.fade}s")
 
     out = mix_transition(
         args.file_a, best["time_a"],
         args.file_b, best["time_b"],
         fade_sec=args.fade,
         output_path=args.out,
+        effect=args.effect,
     )
-    print(f"Transition saved: {out}")
+    print(f"Kaydedildi: {out}")
 
 
 def cmd_scan(args):
     store.init_db()
     directory = Path(args.directory)
-    files = list(directory.rglob("*.flac")) + list(directory.rglob("*.mp3")) \
-          + list(directory.rglob("*.wav")) + list(directory.rglob("*.ogg"))
-    print(f"Found {len(files)} files in {directory}")
+    files = (list(directory.rglob("*.flac")) + list(directory.rglob("*.mp3"))
+           + list(directory.rglob("*.wav")) + list(directory.rglob("*.ogg")))
+    print(f"{len(files)} dosya bulundu: {directory}\n")
     for f in files:
         cached = store.load(str(f.resolve()))
         if cached:
-            print(f"  [cached] {f.name}")
+            print(f"  [cache] {f.name:<60} {cached.bpm:.1f} BPM  {cached.key}")
             continue
         print(f"  Analyzing {f.name} ...", end=" ", flush=True)
         try:
@@ -86,36 +128,164 @@ def cmd_scan(args):
             store.save(result)
             print(f"{result.bpm:.1f} BPM, {result.key}")
         except Exception as e:
-            print(f"ERROR: {e}")
+            print(f"HATA: {e}")
 
+
+def cmd_match(args):
+    store.init_db()
+    songs = store.load_all()
+    if not songs:
+        print("DB boş — önce 'scan' çalıştır.")
+        return
+
+    print(f"\n{len(songs)} şarkı karşılaştırılıyor...\n")
+    pairs = find_compatible_pairs(songs, min_score=args.min_score, top_n=args.top)
+
+    if not pairs:
+        print(f"Min skor {args.min_score} üzerinde uyumlu çift bulunamadı.")
+        return
+
+    print(f"  {'#':<3}  {'SKOR':<6}  {'KEY':<4}  {'BPM FARKI':<10}  ŞARKILAR")
+    print(f"  {'─'*70}")
+    for i, p in enumerate(pairs, 1):
+        key_icon = "✓" if p["key_compatible"] else "~"
+        bpm_diff = abs(p["bpm_a"] - p["bpm_b"])
+        name_a = _song_name(p["song_a"].path)[:28]
+        name_b = _song_name(p["song_b"].path)[:28]
+        print(f"  {i:<3}  {p['score']:.2f}   {key_icon}    {bpm_diff:<10.1f}  {name_a}  ↔  {name_b}")
+
+
+def cmd_setlist(args):
+    store.init_db()
+    songs = store.load_all()
+    if not songs:
+        print("DB boş — önce 'scan' çalıştır.")
+        return
+
+    start = None
+    if args.start:
+        query = args.start.lower()
+        matches = [s for s in songs if query in _song_name(s.path).lower()]
+        if matches:
+            start = matches[0]
+            print(f"Başlangıç: {_song_name(start.path)}")
+        else:
+            print(f"'{args.start}' bulunamadı, en enerjik şarkıdan başlanıyor.")
+
+    setlist = build_setlist(songs, start_song=start, length=args.length)
+
+    print(f"\n{'─'*55}")
+    print(f"  SETLIST ({len(setlist)} şarkı)")
+    print(f"{'─'*55}")
+    for i, song in enumerate(setlist, 1):
+        print(f"  {i:>2}. {_song_name(song.path):<45} {song.bpm:.1f} BPM  {song.key}")
+        if i < len(setlist):
+            score = compatibility_score(song, setlist[i])
+            bar = "█" * int(score * 10) + "░" * (10 - int(score * 10))
+            print(f"       ↓ [{bar}] {score:.2f}")
+    print(f"{'─'*55}")
+
+
+def cmd_automix(args):
+    store.init_db()
+    songs = store.load_all()
+    if not songs:
+        print("DB boş — önce 'scan' çalıştır.")
+        return
+
+    setlist = build_setlist(songs, length=args.length)
+    print(f"\nSetlist oluşturuldu ({len(setlist)} şarkı), mix üretiliyor...\n")
+
+    out_dir = Path("output")
+    out_dir.mkdir(exist_ok=True)
+
+    for i in range(len(setlist) - 1):
+        a = setlist[i]
+        b = setlist[i + 1]
+        name = f"{i+1:02d}_transition_{_song_name(a.path)[:20]}_to_{_song_name(b.path)[:20]}.flac"
+        name = name.replace(" ", "_")
+        out_path = str(out_dir / name)
+
+        comparison = compare_songs(a, b)
+        sync = comparison["sync_points"]
+        if not sync:
+            print(f"  [{i+1}] Sync yok, atlanıyor.")
+            continue
+
+        best = sync[0]
+        print(f"  [{i+1}] {_song_name(a.path)[:25]} → {_song_name(b.path)[:25]}  "
+              f"(skor {compatibility_score(a,b):.2f}, efekt: {args.effect})")
+
+        try:
+            mix_transition(
+                a.path, best["time_a"],
+                b.path, best["time_b"],
+                fade_sec=args.fade,
+                output_path=out_path,
+                effect=args.effect,
+            )
+            print(f"       → {out_path}")
+        except Exception as e:
+            print(f"       HATA: {e}")
+
+    print(f"\nTamamlandı! Dosyalar: {out_dir.resolve()}")
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(prog="crazy_dj")
+    parser = argparse.ArgumentParser(prog="crazy_dj", description="DJ simulation & auto-mixer")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_analyze = sub.add_parser("analyze")
-    p_analyze.add_argument("file")
-    p_analyze.add_argument("--force", action="store_true")
+    # analyze
+    p = sub.add_parser("analyze", help="Tek şarkı analiz et")
+    p.add_argument("file")
+    p.add_argument("--force", action="store_true")
 
-    p_compare = sub.add_parser("compare")
-    p_compare.add_argument("file_a")
-    p_compare.add_argument("file_b")
+    # compare
+    p = sub.add_parser("compare", help="İki şarkıyı karşılaştır")
+    p.add_argument("file_a")
+    p.add_argument("file_b")
 
-    p_mix = sub.add_parser("mix")
-    p_mix.add_argument("file_a")
-    p_mix.add_argument("file_b")
-    p_mix.add_argument("--fade", type=float, default=8.0)
-    p_mix.add_argument("--out", default="output/transition.flac")
+    # mix
+    p = sub.add_parser("mix", help="Transition klip üret")
+    p.add_argument("file_a")
+    p.add_argument("file_b")
+    p.add_argument("--fade", type=float, default=8.0)
+    p.add_argument("--effect", default="sweep",
+                   choices=["clean", "sweep", "echo", "deep", "energetic"])
+    p.add_argument("--out", default="output/transition.flac")
 
-    p_scan = sub.add_parser("scan")
-    p_scan.add_argument("directory")
+    # scan
+    p = sub.add_parser("scan", help="Klasörü tara ve analiz et")
+    p.add_argument("directory")
+
+    # match
+    p = sub.add_parser("match", help="DB'den uyumlu çiftleri listele")
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--min-score", type=float, default=0.55)
+
+    # setlist
+    p = sub.add_parser("setlist", help="Otomatik setlist oluştur")
+    p.add_argument("--length", type=int, default=8)
+    p.add_argument("--start", type=str, default=None, help="Başlangıç şarkısı adı")
+
+    # automix
+    p = sub.add_parser("automix", help="Setlist + tüm geçişleri üret")
+    p.add_argument("--length", type=int, default=8)
+    p.add_argument("--effect", default="sweep",
+                   choices=["clean", "sweep", "echo", "deep", "energetic"])
+    p.add_argument("--fade", type=float, default=8.0)
 
     args = parser.parse_args()
     {
-        "analyze": cmd_analyze,
-        "compare": cmd_compare,
-        "mix": cmd_mix,
-        "scan": cmd_scan,
+        "analyze":  cmd_analyze,
+        "compare":  cmd_compare,
+        "mix":      cmd_mix,
+        "scan":     cmd_scan,
+        "match":    cmd_match,
+        "setlist":  cmd_setlist,
+        "automix":  cmd_automix,
     }[args.command](args)
 
 
