@@ -288,11 +288,11 @@ def cmd_engines(args):
     print(f"  CLAP (semantik arama)  {'✓ Kurulu' if clap_ok() else '✗ Kurulu değil  →  pip install msclap'}")
 
     try:
-        import madmom
-        madmom_ok = True
+        import beat_this
+        beat_ok = True
     except ImportError:
-        madmom_ok = False
-    print(f"  madmom (downbeat)      {'✓ Kurulu' if madmom_ok else '✗ Kurulu değil  →  pip install madmom'}")
+        beat_ok = False
+    print(f"  beat-this (downbeat)   {'✓ Kurulu' if beat_ok else '✗ Kurulu değil  →  pip install beat-this'}")
     print()
 
 
