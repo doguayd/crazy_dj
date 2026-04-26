@@ -33,6 +33,11 @@ import os
 import sys
 from pathlib import Path
 
+# Windows terminali UTF-8 yapılandır
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 from analyzer.audio_analyzer import analyze
 from analyzer.similarity import compare as compare_songs
 from analyzer.matcher import find_compatible_pairs, build_setlist, compatibility_score
